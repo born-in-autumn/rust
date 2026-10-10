@@ -1245,7 +1245,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         main_trait_predicate: ty::PolyTraitClause<'tcx>,
         span: Span,
     ) -> bool {
-        let &[candidate] = &self.find_similar_impl_candidates(leaf_trait_predicate)[..] else {
+        let &[candidate] = &self.find_similar_impl_candidates(
+            leaf_trait_predicate.def_id(),
+            leaf_trait_predicate.self_ty().skip_binder(),
+        )[..] else {
             return false;
         };
         let candidate = candidate.trait_ref;
@@ -3832,7 +3835,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         true
     }
 
-    pub(super) fn note_obligation_cause_code<T>(
+    pub(crate) fn note_obligation_cause_code<T>(
         &self,
         body_def_id: LocalDefId,
         err: &mut Diag<'_>,
@@ -3903,7 +3906,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             | ObligationCauseCode::ReturnNoExpression
             | ObligationCauseCode::Misc
             | ObligationCauseCode::WellFormed(..)
-            | ObligationCauseCode::MatchImpl(..)
             | ObligationCauseCode::ReturnValue(_)
             | ObligationCauseCode::BlockTailExpression(..)
             | ObligationCauseCode::AwaitableExpr(_)
@@ -4323,7 +4325,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                     err.help("unsized fn params are gated as an unstable feature");
                 }
             }
-            ObligationCauseCode::SizedReturnType | ObligationCauseCode::SizedCallReturnType => {
+            ObligationCauseCode::SizedReturnType | ObligationCauseCode::SizedCallReturnType(_) => {
                 err.note("the return type of a function must have a statically known size");
             }
             ObligationCauseCode::SizedYieldType => {
@@ -4417,6 +4419,18 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             }
             ObligationCauseCode::SharedStatic => {
                 err.note("shared static variables must have a type that implements `Sync`");
+            }
+            ObligationCauseCode::MatchImpl(ref cause, _) => {
+                self.note_obligation_cause_code_inner(
+                    body_def_id,
+                    err,
+                    predicate,
+                    param_env,
+                    &cause.code(),
+                    obligated_types,
+                    seen_requirements,
+                    closure_capture_ty,
+                );
             }
             ObligationCauseCode::BuiltinDerived(ref data) => {
                 let parent_trait_ref = self.deeply_resolve_ignoring_regions(data.parent_trait_pred);
@@ -4960,8 +4974,10 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                         .as_ref()
                         .and_then(|typeck| typeck.node_type_opt(expr.hir_id))
                     && let Some(pred) = predicate.as_clause()
-                    && let ty::ClauseKind::Trait(pred) = pred.kind().skip_binder()
-                    && self.can_eq(param_env, pred.self_ty(), expr_ty)
+                    && let Some(pred) = pred.as_trait_clause()
+                    && self
+                        .infcx
+                        .enter_forall(pred, |pred| self.can_eq(param_env, pred.self_ty(), expr_ty))
                 {
                     (expr_ty, expr)
                 } else {

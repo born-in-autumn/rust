@@ -1328,18 +1328,19 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     enable_feature: self.tcx().sess.is_nightly_build(),
                 })
             }
-            ResolutionError::ParamInNonTrivialAnonConst { is_gca, name, param_kind: is_type } => {
-                self.dcx().create_err(diagnostics::ParamInNonTrivialAnonConst {
-                    span,
-                    name,
-                    param_kind: is_type,
-                    help: self.tcx.sess.is_nightly_build()
-                        && !self.tcx.features().gca_min_const_items(),
-                    is_gca,
-                    help_gca: is_gca,
-                    help_suggest_gca: self.tcx.sess.is_nightly_build() && !is_gca,
-                })
-            }
+            ResolutionError::ParamInNonTrivialAnonConst {
+                is_gca_const_items,
+                name,
+                param_kind,
+            } => self.dcx().create_err(diagnostics::ParamInNonTrivialAnonConst {
+                span,
+                name,
+                param_kind,
+                help: self.tcx.sess.is_nightly_build() && !self.tcx.features().gca(),
+                is_gca_const_items,
+                help_gca: is_gca_const_items,
+                help_suggest_gca: self.tcx.sess.is_nightly_build() && !is_gca_const_items,
+            }),
             ResolutionError::ParamInEnumDiscriminant { name, param_kind: is_type } => {
                 self.dcx().create_err(diagnostics::ParamInEnumDiscriminant {
                     span,
@@ -1398,6 +1399,8 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 code,
                 trait_item_span,
                 trait_path,
+                trait_span,
+                impl_span,
             } => self
                 .dcx()
                 .create_err(diagnostics::TraitImplMismatch {
@@ -1406,16 +1409,24 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     kind,
                     trait_path,
                     trait_item_span,
+                    trait_span,
+                    impl_span,
                 })
                 .with_code(code),
-            ResolutionError::TraitImplDuplicate { name, trait_item_span, old_span } => {
-                self.dcx().create_err(diagnostics::TraitImplDuplicate {
-                    span,
-                    name,
-                    trait_item_span,
-                    old_span,
-                })
-            }
+            ResolutionError::TraitImplDuplicate {
+                name,
+                trait_item_span,
+                old_span,
+                trait_span,
+                impl_span,
+            } => self.dcx().create_err(diagnostics::TraitImplDuplicate {
+                span,
+                name,
+                trait_item_span,
+                trait_span,
+                impl_span,
+                old_span,
+            }),
             ResolutionError::InvalidAsmSym => {
                 self.dcx().create_err(diagnostics::InvalidAsmSym { span })
             }
@@ -1986,7 +1997,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
             is_expected,
             &|_| true,
         );
-        self.add_typo_suggestion(err, suggestion, ident.span);
+        self.add_typo_suggestion(err, suggestion, ident.span, None);
         self.detect_derive_attribute(err, ident, parent_scope, sugg_span);
 
         let import_suggestions =
@@ -2270,6 +2281,7 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
         err: &mut Diag<'_>,
         suggestion: Option<TypoSuggestion>,
         span: Span,
+        prefix: Option<Ident>,
     ) {
         let suggestion = match suggestion {
             None => return,
@@ -2300,6 +2312,9 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                 //    |
                 // LL | const Y: X = Y("ö");
                 //    |              ^
+                return;
+            }
+            if span.in_derive_expansion() {
                 return;
             }
             let span = self.tcx.sess.source_map().guess_head_span(def_span);
@@ -2344,7 +2359,10 @@ impl<'ra, 'tcx> Resolver<'ra, 'tcx> {
                     format!("maybe you meant this {}", suggestion.res.descr())
                 }
             };
-            (span, msg, suggestion.candidate.to_ident_string())
+            let candidate_str = suggestion.candidate.to_ident_string();
+            let sugg =
+                if let Some(p) = prefix { format!("{p}: {candidate_str}") } else { candidate_str };
+            (span, msg, sugg)
         };
         err.span_suggestion_verbose(span, msg, sugg, Applicability::MaybeIncorrect);
     }
